@@ -1,0 +1,27 @@
+# Build output
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Logs & runtime data our mini-HDFS will generate
+*.log
+/data/
+/namenode-data/
+/datanode-data/
+/tmp/
+
+# Env / secrets
+.env
+*.local
