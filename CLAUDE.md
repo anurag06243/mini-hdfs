@@ -141,8 +141,14 @@ Score and log gaps in `docs/interview/gaps.md`.
 
 ## Phase spine (Tier 1 MVP) & timeline
 
-Start: Thu 2026-08-13. MVP target: **Sun 2026-08-24**. Per-phase dates are
-targets set at each phase start; a phase closes only when its gauntlet passes.
+**Timeline reset (2026-09-01):** original Aug-24 target missed (medical + office
+crunch, legit). Phase 0 done. At **10+ hrs/week**, remaining phases (1–7) compress
+into ~2.5 weeks → **new MVP target ~Sun 2026-09-21**. Working split: **design /
+Q&A / gauntlet = any device** (mobile via claude.ai/code), **implementation =
+PC**. Per-phase dates set at each phase start; a phase closes only when its
+gauntlet passes.
+
+Original schedule below (kept for reference):
 
 | # | Phase | Core idea | Target |
 |---|---|---|---|
@@ -188,6 +194,7 @@ Phase 0 gauntlet DONE (2026-08-13): **PASS**, with growth shown. Gaps logged in
 arithmetic (usable = raw ÷ RF = ÷3, not ÷4). Diagram tooling: Figma/whiteboard →
 PNG in docs/uml (not Mermaid).
 
-**Next: Phase 1 — High-Level Design.** First HLD decision to reason through:
-decompose the system into NameNode / DataNode / Client and define their
-responsibilities + communication (RPC/REST choice → needs an ADR).
+**IN PROGRESS: Phase 1 — High-Level Design** (started 2026-09-01). Repo now on
+GitHub (see above). Opened with a cold re-check of the 2 HIGH Phase-0 gaps, then
+HLD component decomposition: NameNode / DataNode / Client responsibilities +
+communication (RPC/REST choice → first Phase-1 ADR).
