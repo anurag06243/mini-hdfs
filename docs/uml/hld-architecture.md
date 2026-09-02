@@ -8,13 +8,13 @@
 ## The one idea to hold
 
 **Metadata and data travel on different paths.**
-- **Control plane** = Client ↔ NameNode (small, cheap: "where are the blocks?").
-- **Data plane** = Client ↔ DataNodes (huge, bandwidth-heavy: the actual bytes).
+- **Control plane** = Client to NameNode (small, cheap: "where are the blocks?").
+- **Data plane** = Client to DataNodes (huge, bandwidth-heavy: the actual bytes).
 - **The NameNode is never in the data path** — that's what lets one NameNode
   coordinate a thousand DataNodes moving petabytes.
 - **DataNodes always initiate** talking to the NameNode (heartbeats, block
   reports). The NameNode never calls a DataNode directly; it piggybacks commands
-  on heartbeat *replies*.
+  on heartbeat replies.
 
 ---
 
@@ -25,7 +25,7 @@ flowchart LR
     client["CLIENT<br/>splits files into blocks<br/>orchestrates read and write<br/>retries failed replicas"]
 
     subgraph cluster["Mini-HDFS Cluster"]
-        nn["NAMENODE<br/>namespace tree + block map<br/>metadata only, in RAM<br/>never touches data bytes"]
+        nn["NAMENODE<br/>namespace tree plus block map<br/>metadata only, in RAM<br/>never touches data bytes"]
         dn1["DATANODE 1<br/>block bytes on disk"]
         dn2["DATANODE 2<br/>block bytes on disk"]
         dn3["DATANODE 3<br/>block bytes on disk"]
@@ -36,9 +36,9 @@ flowchart LR
     client -->|"DATA PLANE - actual bytes"| dn2
     client -->|"DATA PLANE - actual bytes"| dn3
 
-    dn1 -.->|"heartbeat + block report"| nn
-    dn2 -.->|"heartbeat + block report"| nn
-    dn3 -.->|"heartbeat + block report"| nn
+    dn1 -.->|"heartbeat and block report"| nn
+    dn2 -.->|"heartbeat and block report"| nn
+    dn3 -.->|"heartbeat and block report"| nn
 ```
 
 Solid arrows = per-request. Dotted arrows = background/periodic, always
@@ -57,17 +57,17 @@ sequenceDiagram
     participant NN as NameNode
     participant DN as DataNodes
 
-    U->>NN: create /logs/day1.txt
-    Note over NN: check path is free,<br/>pick DataNodes for each block<br/>(internal decision, uses heartbeat info)
+    U->>NN: create file at path
+    Note over NN: check path is free,<br/>pick DataNodes for each block,<br/>internal decision using heartbeat info
     NN-->>U: per-block list of target DataNodes
     U->>DN: stream block bytes via replication pipeline
     DN-->>U: ack once min-replicated
     U->>NN: close file
-    Note over NN: file becomes visible only now<br/>(write-once, visible-at-close)
+    Note over NN: file becomes visible only now,<br/>write-once, visible at close
 ```
 
 Key points: allocation is the NameNode's **internal** choice (no call to a
-DataNode); data flows Client → DataNodes only; the file is invisible until close.
+DataNode); data flows Client to DataNodes only; the file is invisible until close.
 
 ---
 
@@ -82,13 +82,13 @@ sequenceDiagram
     participant NN as NameNode
     participant DN as DataNodes
 
-    U->>NN: getBlockLocations /logs/day1.txt
+    U->>NN: getBlockLocations for path
     NN-->>U: for each block, which DataNodes hold it
-    loop each block, in order
+    loop each block in order
         U->>DN: read block from the closest live replica
         DN-->>U: block bytes
     end
-    Note over U: reassemble blocks into the file<br/>on replica failure, retry another replica
+    Note over U: reassemble blocks into the file,<br/>on replica failure retry another replica
 ```
 
 Key points: the NameNode returns **locations, not data**; parallel-friendly
@@ -96,7 +96,7 @@ because different blocks live on different DataNodes.
 
 ---
 
-## 4. Background — heartbeats & block reports (always DataNode-initiated)
+## 4. Background — heartbeats and block reports (always DataNode-initiated)
 
 Not part of any client request. This is how the NameNode knows who is alive and
 what blocks exist, and how it sends commands back.
@@ -107,12 +107,12 @@ sequenceDiagram
     participant NN as NameNode
 
     loop every few seconds
-        DN->>NN: heartbeat (I am alive, capacity, load)
-        NN-->>DN: reply may carry commands<br/>(replicate block X, delete block Y)
+        DN->>NN: heartbeat - alive, capacity, load
+        NN-->>DN: reply may carry commands<br/>such as replicate block X or delete block Y
     end
     loop periodically
-        DN->>NN: block report (full list of blocks I hold)
-        Note over NN: reconcile block map;<br/>detect under / over-replication
+        DN->>NN: block report - full list of blocks I hold
+        Note over NN: reconcile block map,<br/>detect under and over replication
     end
 ```
 
@@ -122,10 +122,14 @@ as replies to heartbeats — it never opens a connection to a DataNode.
 ---
 
 ## Corrections captured (from the first sketch)
-- Heartbeat direction is **DataNode → NameNode**, not the reverse; and it is
+- Heartbeat direction is **DataNode to NameNode**, not the reverse; and it is
   background, not part of the client-op flow.
 - "allocate datanode" is an **internal NameNode decision**, not a call to a
-  DataNode — so there is **no NameNode → DataNode arrow** during a client write.
+  DataNode — so there is **no NameNode to DataNode arrow** during a client write.
 - The NameNode **never provides file data** — only metadata/locations. Data comes
   from DataNodes.
 - **Read and write are separate flows** — drawn separately above.
+
+## Mermaid gotcha (why this file broke once)
+Avoid `/`, `(`, `)`, and `;` inside diagram labels — GitHub's Mermaid parser
+rejects them even when they look harmless. Use `and`, `or`, `-`, or commas.
