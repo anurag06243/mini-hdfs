@@ -15,7 +15,7 @@ distributed file system. A real control-plane transport had to be built.
 ADR-0002 chose gRPC. Two things changed since then:
 
 1. The project rule "no black boxes — every mechanism explainable down to the wire
-   format" (CLAUDE.md, rule 4). gRPC hides framing, connection management, and
+   format" (a ground rule of this project). gRPC hides framing, connection management, and
    serialization behind generated stubs and HTTP/2.
 2. The control surface turned out small and stable: 14 operations
    (`createFile`, `addBlock`, `heartbeat`, `blockReport`, ...), all request/response,

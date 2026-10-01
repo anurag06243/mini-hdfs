@@ -140,5 +140,4 @@ mvn clean test
 | [Requirements & capacity math](docs/requirement.md) | Why 128 MB blocks, small-files problem, NameNode memory |
 | [HLD](docs/uml/hld-architecture.md) | Components and control/data plane split |
 | [ADRs](docs/adr/) | Language, communication, RPC protocol, storage & integrity |
-| [Learning logs](docs/learning/) | Phase-by-phase deep dives; [phase 8](docs/learning/phase8-production-hardening.md) covers the move to a real cluster |
-| [Interview question bank](docs/interview/) | 70+ questions with key points, by phase |
+| [Live demo](docs/DEMO.md) | 14 scenes of real cluster output, including failure injection |

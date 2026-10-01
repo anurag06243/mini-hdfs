@@ -20,7 +20,12 @@ desktop.ini
 /data/
 /namenode-data/
 /datanode-data/
+/demo-run/
 /tmp/
+
+# Private notes (separate private repo) and the local pointer to them
+/private/
+/CLAUDE.md
 
 # Env / secrets
 .env
