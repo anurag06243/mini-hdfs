@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/** Volatile block store used by unit tests that don't need real disks. */
 public class InMemoryDataNode implements IDataNodeStorage {
 
     private final String datanodeId;
@@ -34,32 +35,38 @@ public class InMemoryDataNode implements IDataNodeStorage {
     }
 
     @Override
+    public void deleteBlock(long blockId) {
+        blocks.remove(blockId);
+    }
+
+    @Override
     public String getDatanodeId() {
         return datanodeId;
     }
 
+    @Override
     public List<Long> listBlocks() {
         return List.copyOf(blocks.keySet());
     }
 
+    @Override
+    public long usedBytes() {
+        return blocks.values().stream().mapToLong(b -> b.length).sum();
+    }
+
     /**
-     * Executes commands received in a HeartbeatResponse.
-     * REPLICATE: read block from self → write to the target DN.
-     * DELETE: remove the block from local storage.
-     *
-     * @param commands  the list from HeartbeatResponse.commands()
-     * @param registry  map of datanodeId → IDataNodeStorage, used to reach the target DN
+     * Executes heartbeat commands against other in-process storages (no network).
+     * REPLICATE copies the block to the target; DELETE removes it locally.
      */
     public void executeCommands(List<DatanodeCommand> commands, Map<String, IDataNodeStorage> registry)
             throws IOException {
         for (DatanodeCommand cmd : commands) {
             switch (cmd.action()) {
                 case REPLICATE -> {
-                    byte[] data = readBlock(cmd.blockId());
                     IDataNodeStorage target = registry.get(cmd.targetDn().datanodeId());
                     if (target == null) throw new IOException(
                             "REPLICATE target not in registry: " + cmd.targetDn().datanodeId());
-                    target.writeBlock(cmd.blockId(), data);
+                    target.writeBlock(cmd.blockId(), readBlock(cmd.blockId()));
                 }
                 case DELETE -> blocks.remove(cmd.blockId());
             }

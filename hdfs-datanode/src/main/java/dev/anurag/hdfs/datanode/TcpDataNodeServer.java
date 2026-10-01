@@ -1,8 +1,11 @@
 package dev.anurag.hdfs.datanode;
 
+import dev.anurag.hdfs.common.dto.DatanodeDescriptor;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -12,21 +15,26 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * TCP server that handles DataNode block I/O requests.
- * Accepts WRITE_BLOCK (with pipeline forwarding) and READ_BLOCK requests.
- * Each connection is handled on a separate thread.
+ * TCP server for a DataNode's block I/O (see {@link BlockProtocol}). One thread per connection.
+ * Writes are store-and-forward: verify checksum, store locally, forward to the next node, then
+ * ACK upstream only after the downstream ACK — so the client's ACK means every replica is stored.
  */
 public class TcpDataNodeServer implements AutoCloseable {
 
     private final IDataNodeStorage storage;
     private final ServerSocket serverSocket;
-    private final ExecutorService threadPool;
+    private final ExecutorService threadPool = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "dn-xfer");
+        t.setDaemon(true);
+        return t;
+    });
     private volatile boolean running;
 
     public TcpDataNodeServer(IDataNodeStorage storage, int port) throws IOException {
         this.storage = storage;
-        this.serverSocket = new ServerSocket(port);
-        this.threadPool = Executors.newCachedThreadPool();
+        this.serverSocket = new ServerSocket();
+        serverSocket.setReuseAddress(true);
+        serverSocket.bind(new InetSocketAddress(port));
     }
 
     /** Returns the port actually bound (useful when port 0 was passed). */
@@ -34,7 +42,6 @@ public class TcpDataNodeServer implements AutoCloseable {
         return serverSocket.getLocalPort();
     }
 
-    /** Starts the accept loop in a background thread. */
     public void start() {
         running = true;
         Thread acceptThread = new Thread(this::acceptLoop, "dn-accept-" + getPort());
@@ -46,122 +53,90 @@ public class TcpDataNodeServer implements AutoCloseable {
         while (running) {
             try {
                 Socket client = serverSocket.accept();
+                client.setSoTimeout(BlockProtocol.IO_TIMEOUT_MS);
                 threadPool.submit(() -> handleConnection(client));
             } catch (SocketException e) {
-                if (running) {
-                    System.err.println("[DN:" + getPort() + "] Accept error: " + e.getMessage());
-                }
-                // else: normal shutdown via close()
+                if (running) System.err.println("[DN:" + getPort() + "] accept error: " + e.getMessage());
             } catch (IOException e) {
-                System.err.println("[DN:" + getPort() + "] Accept error: " + e.getMessage());
+                System.err.println("[DN:" + getPort() + "] accept error: " + e.getMessage());
             }
         }
     }
 
     private void handleConnection(Socket socket) {
         try (socket;
-             DataInputStream  in  = new DataInputStream(socket.getInputStream());
+             DataInputStream in = new DataInputStream(socket.getInputStream());
              DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
-
             byte opcode = in.readByte();
             switch (opcode) {
                 case BlockProtocol.OP_WRITE_BLOCK -> handleWrite(in, out);
                 case BlockProtocol.OP_READ_BLOCK  -> handleRead(in, out);
-                default -> out.writeByte(BlockProtocol.STATUS_ERROR);
+                default -> { out.writeByte(BlockProtocol.STATUS_ERROR); out.writeUTF("Unknown op " + opcode); }
             }
-
+            out.flush();
         } catch (IOException e) {
-            System.err.println("[DN:" + getPort() + "] Connection error: " + e.getMessage());
+            if (running) System.err.println("[DN:" + getPort() + "] connection error: " + e.getMessage());
         }
     }
-
-    // -------------------------------------------------------------------------
-    // WRITE_BLOCK handler
-    // -------------------------------------------------------------------------
 
     private void handleWrite(DataInputStream in, DataOutputStream out) throws IOException {
-        long blockId     = in.readLong();
-        List<PipelineEntry> pipeline = readPipeline(in);
-        long dataLen     = in.readLong();
-        byte[] data      = in.readNBytes((int) dataLen);
+        long blockId = in.readLong();
+        List<DatanodeDescriptor> downstream = readPipeline(in);
+        long len = in.readLong();
+        if (len < 0 || len > BlockProtocol.MAX_BLOCK_BYTES) throw new IOException("Bad block length " + len);
+        byte[] data = in.readNBytes((int) len);
+        long crc = in.readLong();
 
-        // 1. Write locally first
-        storage.writeBlock(blockId, data);
-
-        // 2. Forward to the rest of the pipeline (pipeline shrinks at each hop)
-        if (!pipeline.isEmpty()) {
-            PipelineEntry next = pipeline.get(0);
-            List<PipelineEntry> remaining = pipeline.subList(1, pipeline.size());
-            forwardWrite(blockId, remaining, data, next.host, next.port);
+        if (data.length != len || BlockProtocol.crc32(data) != crc) {
+            fail(out, "");
+            return;
         }
-
-        // 3. ACK upstream
-        out.writeByte(BlockProtocol.STATUS_OK);
-        out.flush();
-    }
-
-    private void forwardWrite(long blockId, List<PipelineEntry> remainingPipeline,
-                              byte[] data, String host, int port) throws IOException {
-        try (Socket downstream = new Socket(host, port);
-             DataOutputStream downOut = new DataOutputStream(downstream.getOutputStream());
-             DataInputStream  downIn  = new DataInputStream(downstream.getInputStream())) {
-
-            downOut.writeByte(BlockProtocol.OP_WRITE_BLOCK);
-            downOut.writeLong(blockId);
-            writePipeline(downOut, remainingPipeline);
-            downOut.writeLong(data.length);
-            downOut.write(data);
-            downOut.flush();
-
-            byte status = downIn.readByte();
-            if (status != BlockProtocol.STATUS_OK) {
-                throw new IOException("Downstream pipeline write failed for block " + blockId);
+        try {
+            storage.writeBlock(blockId, data);
+        } catch (IOException e) {
+            System.err.println("[DN:" + getPort() + "] local write of block " + blockId + " failed: " + e.getMessage());
+            fail(out, "");
+            return;
+        }
+        if (!downstream.isEmpty()) {
+            try {
+                BlockTransferClient.writeBlock(blockId, downstream, data);
+            } catch (PipelineException e) {
+                fail(out, e.badNode());
+                return;
             }
         }
+        out.writeByte(BlockProtocol.STATUS_OK);
     }
-
-    // -------------------------------------------------------------------------
-    // READ_BLOCK handler
-    // -------------------------------------------------------------------------
 
     private void handleRead(DataInputStream in, DataOutputStream out) throws IOException {
         long blockId = in.readLong();
-        byte[] data  = storage.readBlock(blockId);
-
+        byte[] data;
+        try {
+            data = storage.readBlock(blockId);
+        } catch (IOException e) {
+            out.writeByte(BlockProtocol.STATUS_ERROR);
+            out.writeUTF(e.getMessage());
+            return;
+        }
         out.writeByte(BlockProtocol.STATUS_OK);
         out.writeLong(data.length);
         out.write(data);
-        out.flush();
+        out.writeLong(BlockProtocol.crc32(data));
     }
 
-    // -------------------------------------------------------------------------
-    // Pipeline serialisation helpers
-    // -------------------------------------------------------------------------
+    private static void fail(DataOutputStream out, String badNode) throws IOException {
+        out.writeByte(BlockProtocol.STATUS_ERROR);
+        out.writeUTF(badNode);
+    }
 
-    private static List<PipelineEntry> readPipeline(DataInputStream in) throws IOException {
+    private static List<DatanodeDescriptor> readPipeline(DataInputStream in) throws IOException {
         int size = in.readInt();
-        List<PipelineEntry> entries = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            String host = in.readUTF();
-            int    port = in.readInt();
-            entries.add(new PipelineEntry(host, port));
-        }
+        if (size < 0 || size > 64) throw new IOException("Bad pipeline length " + size);
+        List<DatanodeDescriptor> entries = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) entries.add(new DatanodeDescriptor("", in.readUTF(), in.readInt()));
         return entries;
     }
-
-    static void writePipeline(DataOutputStream out, List<PipelineEntry> pipeline) throws IOException {
-        out.writeInt(pipeline.size());
-        for (PipelineEntry e : pipeline) {
-            out.writeUTF(e.host);
-            out.writeInt(e.port);
-        }
-    }
-
-    record PipelineEntry(String host, int port) {}
-
-    // -------------------------------------------------------------------------
-    // Lifecycle
-    // -------------------------------------------------------------------------
 
     @Override
     public void close() throws IOException {

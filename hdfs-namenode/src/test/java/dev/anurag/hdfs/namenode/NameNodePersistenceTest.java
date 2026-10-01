@@ -224,11 +224,12 @@ class NameNodePersistenceTest {
         writeFile(nn1, "/file1.txt", "first".getBytes());
         writeFile(nn1, "/file2.txt", "second".getBytes());
 
-        // Restart
+        // Restart: the NN stays read-only (safe mode) until the block reports arrive
         NameNodeImpl nn2 = new NameNodeImpl(BLOCK_SIZE, dataDir);
-        nn2.registerDatanode(new DatanodeInfo("dn-1", "localhost", 9001, 10_000_000L, 10_000_000L));
-        nn2.registerDatanode(new DatanodeInfo("dn-2", "localhost", 9002, 10_000_000L, 10_000_000L));
-        nn2.registerDatanode(new DatanodeInfo("dn-3", "localhost", 9003, 10_000_000L, 10_000_000L));
+        assertTrue(nn2.isInSafeMode(), "Restarted NN with existing blocks starts in safe mode");
+        assertThrows(Exception.class, () -> nn2.mkdir("/blocked"), "Mutations are refused in safe mode");
+        reregisterAndReport(nn2);
+        assertFalse(nn2.isInSafeMode(), "All blocks reported -> safe mode exits");
 
         // Writing a new file after restart should not throw "already exists"
         // (which would happen if inode IDs collide with existing ones)

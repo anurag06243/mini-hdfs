@@ -3,7 +3,7 @@ package dev.anurag.hdfs.common.model;
 public abstract class INode {
     private final long id;
     private String name;
-    private final INode parent;
+    private INode parent;
     private long createdAt;
     private long modifiedAt;
 
@@ -26,6 +26,10 @@ public abstract class INode {
 
     public INode getParent(){ 
         return this.parent;
+    }
+
+    public void setParent(INode parent) {
+        this.parent = parent;
     }
 
     public String getName(){

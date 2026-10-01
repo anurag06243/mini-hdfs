@@ -6,6 +6,7 @@ import dev.anurag.hdfs.common.dto.HeartbeatRequest;
 import dev.anurag.hdfs.common.dto.HeartbeatResponse;
 import dev.anurag.hdfs.common.model.DatanodeInfo;
 import dev.anurag.hdfs.common.model.DatanodeState;
+import dev.anurag.hdfs.common.protocol.UnregisteredDatanodeException;
 import dev.anurag.hdfs.datanode.InMemoryDataNode;
 import dev.anurag.hdfs.datanode.IDataNodeStorage;
 import dev.anurag.hdfs.namenode.NameNodeImpl;
@@ -70,16 +71,21 @@ class HeartbeatReplicationTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void missingHeartbeat_transitionsToDeadThenNormalOnResume() throws Exception {
+    void missingHeartbeat_transitionsToDead_thenMustReRegister() throws Exception {
         // Let time elapse past the DEAD threshold without any heartbeats
         Thread.sleep(DEAD_MS + 50);
         nameNode.checkAndReplicateDeadNodes();
 
         assertEquals(DatanodeState.DEAD, dn1Info.getState(), "dn-1 should be DEAD");
 
-        // DN comes back — heartbeat should reset to NORMAL
+        // Its replicas were written off, so a plain heartbeat is refused: it must re-register + re-report
+        assertThrows(UnregisteredDatanodeException.class,
+                () -> nameNode.heartbeat(new HeartbeatRequest("dn-1", 0L, 10_000_000L)));
+
+        DatanodeInfo fresh = new DatanodeInfo("dn-1", "localhost", 9001, 10_000_000L, 10_000_000L);
+        nameNode.registerDatanode(fresh);
         nameNode.heartbeat(new HeartbeatRequest("dn-1", 0L, 10_000_000L));
-        assertEquals(DatanodeState.NORMAL, dn1Info.getState(), "dn-1 should be NORMAL after heartbeat");
+        assertEquals(DatanodeState.NORMAL, fresh.getState(), "dn-1 should be NORMAL after re-registering");
     }
 
     // -------------------------------------------------------------------------

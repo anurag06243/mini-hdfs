@@ -24,6 +24,12 @@ public class FileNode extends INode {
         return this.blockIds;
     }
 
+    public boolean removeLastBlockId(long blockId) {
+        if (blockIds.isEmpty() || blockIds.get(blockIds.size() - 1) != blockId) return false;
+        blockIds.remove(blockIds.size() - 1);
+        return true;
+    }
+
     public void setFileSize(long fileSize) {
         this.fileSize = fileSize;
     }

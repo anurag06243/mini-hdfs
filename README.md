@@ -1,180 +1,137 @@
 # Mini HDFS
 
-A from-scratch implementation of an HDFS-like distributed filesystem in Java, built as a deep-learning vehicle for distributed systems design. This is **not** a Hadoop clone — it is a ground-up implementation of the core concepts that makes HDFS interesting: metadata/data separation, block replication, failure detection, self-healing, write pipelines, and durable recovery.
+[![CI](https://github.com/anurag06243/mini-hdfs/actions/workflows/ci.yml/badge.svg)](https://github.com/anurag06243/mini-hdfs/actions/workflows/ci.yml)
 
-> **Goal:** Be able to answer any HLD/LLD, architecture, scaling, or trade-off question about this system in a FAANG-level interview — because I designed and wrote it.
+A distributed file system in the style of HDFS, written from scratch in Java 21 with **zero
+runtime dependencies**. The NameNode, DataNodes, and clients are separate processes that
+talk over TCP: a hand-built binary RPC protocol for metadata and a streaming protocol for
+block data.
+
+Files are split into blocks and replicated 3× through a DataNode write pipeline. The
+cluster detects dead nodes and corrupt replicas and repairs itself. NameNode metadata
+survives crashes through a write-ahead log and checkpoints.
+
+Not a Hadoop clone: a ground-up implementation of the mechanisms that make HDFS work, built
+to understand them end to end.
+
+---
+
+## Try it (2 minutes)
+
+```powershell
+mvn -q compile
+bin/start-cluster.ps1          # NameNode + 3 DataNodes, each in its own window
+bin/hdfs.ps1 dfs               # interactive client
+```
+Linux/macOS: `bin/start-cluster.sh` and `bin/hdfs dfs`.
+
+```
+hdfs:/> mkdir -p /docs/2026
+hdfs:/> put README.md /docs                  # upload a local file
+hdfs:/> cd /docs
+hdfs:/docs> stat README.md                   # which DataNodes hold each block
+hdfs:/docs> report                           # DataNode liveness as the NameNode sees it
+```
+
+Then break things:
+
+| Do this | Watch this |
+|---|---|
+| Close a DataNode window | NameNode log: `STALE` → `DEAD` → `block N under-replicated: dn-2 -> dn-3`; `stat` shows 3 replicas again |
+| Restart that DataNode | It re-registers; its now-extra copies get `DELETE`d |
+| Close the NameNode, start it again (`bin/hdfs.ps1 namenode --dir data/namenode`) | Safe mode until DataNodes reconnect and report on their own; every file intact |
+| Flip a byte in `data/dn-1/current/blk_1` | Reads skip the bad copy; it is quarantined to `corrupt/` and re-replicated |
+| `rm` a file | Its blocks disappear from every DataNode's disk |
+
+Stop everything: `bin/stop-cluster.ps1` / `bin/stop-cluster.sh`.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         HDFS Client                              │
-│  put(data, path)  get(path)  mkdir  ls  rename  delete           │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ Control plane (method calls → gRPC in prod)
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        NameNode                                   │
-│                                                                   │
-│  Namespace tree           BlockMap              Persistence       │
-│  INode (abstract)         block → [DN, DN, DN]  EditLog (WAL)    │
-│  ├─ DirectoryNode         DN → [block, block]   FsImage snapshot │
-│  └─ FileNode                                                      │
-│       └─ [blockId, ...]   DatanodeInfo          pendingCommands  │
-│                           NORMAL/STALE/DEAD     (piggybacked)    │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ Data plane: raw TCP
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-   ┌────────────┐  ┌────────────┐  ┌────────────┐
-   │ DataNode 1 │  │ DataNode 2 │  │ DataNode 3 │
-   │ TCP server │  │ TCP server │  │ TCP server │
-   │ blocks:    │  │ blocks:    │  │ blocks:    │
-   │ {1,4,7,…} │  │ {1,2,5,…} │  │ {1,3,6,…} │
-   └────────────┘  └────────────┘  └────────────┘
-
-Write pipeline:  Client ──► DN-1 ──► DN-2 ──► DN-3
-                               ◄─────────────────  ACK
+                      ┌─────────────────────────── NameNode process ───────────────────────────┐
+  client process      │  NameNodeServer: thread per connection, one read/write lock            │
+ ┌───────────────┐ RPC│  ┌───────────────────────┐  ┌────────────────┐  ┌──────────────────┐  │
+ │ hdfs dfs ...  │───▶│  │ namespace tree (INode)│  │ BlockMap       │  │ edit log (fsync) │  │
+ │ HdfsClient    │    │  │ file -> [block ids]   │  │ block -> nodes │  │ + fsimage        │  │
+ └──────┬────────┘    │  └───────────────────────┘  └────────────────┘  └──────────────────┘  │
+        │             │  monitor: liveness (NORMAL/STALE/DEAD), re-replication, checkpoints    │
+        │             └───────────────────────────────▲────────────────────────────────────────┘
+        │ block bytes (never through the NameNode)    │ heartbeat (commands ride the reply),
+        ▼                                             │ full block reports — DataNode -> NameNode only
+ ┌────────────┐   pipeline   ┌────────────┐   ┌────────────┐
+ │ DataNode 1 │─────────────▶│ DataNode 2 │──▶│ DataNode 3 │   each hop: verify CRC, fsync to disk,
+ │ blk_*.meta │◀── ACK ──────│            │◀──│            │   forward, ACK after downstream ACK
+ └────────────┘              └────────────┘   └────────────┘
 ```
 
-**Control plane** (metadata): client ↔ NameNode via `INameNodeService`; DataNode ↔ NameNode via `IDatanodeProtocol`. In this implementation both are direct method calls (seams designed for gRPC in a real deployment).
-
-**Data plane** (block bytes): raw TCP with a simple binary protocol. Writes use a chained pipeline; reads stream directly from the closest DataNode with automatic fallback.
+| Concern | How it works |
+|---|---|
+| **Metadata vs data** | The NameNode holds only the namespace and block locations; bytes flow client ↔ DataNode |
+| **Control plane** | Length-prefixed binary frames over persistent TCP connections; 14 operations ([ADR-0003](docs/adr/0003-control-plane-rpc.md)) |
+| **Write path** | `addBlock` → pipeline client → DN → DN → DN; on failure abandon the block, exclude the failed node, retry |
+| **Read path** | Locations from the NameNode (shuffled to spread load); bytes from any replica, checksum-verified, falling back to the next replica |
+| **Failure detection** | Heartbeats every second; STALE nodes get no new blocks; DEAD nodes' blocks are re-replicated from survivors |
+| **Self-healing** | Commands piggyback on heartbeat replies (the NameNode never connects to DataNodes); full block reports reconcile lost, extra, and orphaned replicas |
+| **Durability** | Edit log fsync'd before every mutation is applied; atomic fsimage checkpoints; replay tolerates a torn last entry |
+| **Restart** | Safe mode until ≥ 99.9% of blocks are reported; DataNodes reconnect and re-register on their own |
+| **Integrity** | CRC32 verified by every pipeline hop, on every disk read, and by the client; a background block scanner catches cold-data rot ([ADR-0004](docs/adr/0004-datanode-storage-and-integrity.md)) |
+| **Safety** | A cluster ID handshake stops a DataNode from joining the wrong NameNode (whose block report would otherwise get all its blocks deleted as orphans) |
 
 ---
 
-## What Each Phase Demonstrates
+## Modules
 
-| Phase | Feature | Core concept |
-|-------|---------|--------------|
-| 0 | Requirements + capacity math | Problem framing, why 128 MB blocks |
-| 1 | HLD — component decomposition | Metadata/data separation, control vs data plane |
-| 2 | LLD — classes, contracts, state machines | Composite pattern (`INode`), `BlockMap`, `DatanodeInfo` |
-| 3 | Walking skeleton — write + read in memory | End-to-end path before depth, interface-as-seam |
-| 4+5 | Heartbeats, failure detection, re-replication | Pull model, state machine (NORMAL→STALE→DEAD), command piggybacking |
-| 6 | TCP write pipeline + read path | Chained pipeline, binary protocol, fallback reads |
-| 7 | Edit log + fsimage + restart recovery | WAL, checkpoint, ID generator safety, lease recovery |
+```
+hdfs-common/     wire protocol (RpcOps, Wire, NameNodeRpcClient), protocol interfaces, DTOs, namespace model
+hdfs-namenode/   NameNodeImpl (namespace, BlockMap, liveness, safe mode), NameNodeServer, EditLog, FsImage
+hdfs-datanode/   DataNode (heartbeat loop, commands, block scanner), DiskDataNodeStorage, TcpDataNodeServer
+hdfs-client/     HdfsClient (pipeline write with recovery, fallback read), HdfsCli
+bin/             hdfs / hdfs.ps1, start-cluster, stop-cluster
+```
+
+About 2,700 lines of main code and 1,000 lines of tests.
 
 ---
 
-## Key Design Decisions
-
-### Composite pattern for the namespace
-`INode` (abstract) → `FileNode` (leaf) or `DirectoryNode` (composite). Rename is O(1) — only a namespace pointer moves; block IDs and the BlockMap are untouched.
-
-### Interface-as-seam
-`INameNodeService` and `IDataNodeStorage` decouple the client from the transport. Phase 3–5 use in-memory implementations; Phase 6 swaps in TCP without changing `HdfsClient`.
-
-### Pull model for commands
-The NameNode never opens a connection to a DataNode. Commands (`REPLICATE`, `DELETE`) are queued in `pendingCommands` and piggybacked on heartbeat replies. This keeps the NameNode stateless with respect to outbound connections.
-
-### Full block reports (not deltas)
-Full block reports are idempotent — the NameNode always converges to the correct view regardless of restart history. Delta reports would require both sides to perfectly track "what the other already knows," which is fragile after any restart or partial outage.
-
-### Write-ahead logging
-Every mutating namespace operation writes a log entry to disk **before** updating in-memory state. On restart: load the last fsimage snapshot, replay only the edits written since the snapshot. The BlockMap is not persisted — it is rebuilt from DataNode block reports (the same self-healing mechanism used for failure recovery).
-
----
-
-## Module Layout
-
-```
-mini-hdfs/
-├── hdfs-common/          DTOs, model classes (INode, BlockMap, DatanodeInfo, …)
-├── hdfs-namenode/        NameNodeImpl, INameNodeService, IDatanodeProtocol,
-│                         EditLog, FsImage
-├── hdfs-datanode/        InMemoryDataNode, TcpDataNodeServer, BlockProtocol
-└── hdfs-client/          HdfsClient, TcpBlockWriter, TcpBlockReader
-```
-
----
-
-## Try it: interactive shell
-
-```powershell
-./shell.ps1
-```
-
-Starts an in-process cluster (1 NameNode + 4 DataNodes on real TCP ports, 64 KB blocks, RF=3) and drops you at an `hdfs>` prompt:
-
-```
-hdfs> mkdir /docs
-hdfs> put README.md /docs                 # upload a real file from your disk
-hdfs> write /hello.txt hi there           # or create one from text
-hdfs> mv /hello.txt /docs
-hdfs> cd /docs                            # relative paths and .. work everywhere
-hdfs> ls
-hdfs> stat /docs/README.md                # blocks + which DataNodes hold them
-hdfs> kill dn-1                           # crash a DataNode
-hdfs> wait                                # watch NORMAL -> STALE -> DEAD -> REPLICATE
-hdfs> revive dn-1                         # block report -> DELETE of the extra replica
-hdfs> restart-nn                          # NameNode crash; fsimage + edit log replay
-hdfs> get /docs/README.md out.md          # download it back
-```
-
-`help` lists every command. Each launch starts from an empty cluster (DataNode storage is in memory), and NameNode metadata is written to `shell-data/`.
-
-## Scripted demo
-
-```powershell
-./demo.ps1
-```
-
-Builds the project and runs [`Demo.java`](hdfs-client/src/main/java/dev/anurag/hdfs/client/Demo.java): one NameNode plus four DataNodes on real TCP ports, walked through six scenes: namespace ops + write pipeline, read path, read fallback after a DataNode is killed, NameNode crash + restart (edit-log replay, BlockMap rebuilt from block reports, checkpoint), and failure detection + re-replication. NameNode metadata lands in `demo-data/` so you can inspect `edits.log` and `fsimage.bin`.
-
----
-
-## Build & Test
-
-**Requirements:** Java 22+, Maven 3.9+
+## Tests
 
 ```bash
-# Build and run all 19 tests
 mvn clean test
 ```
 
-```bash
-# Build only (no tests)
-mvn clean compile
-```
+42 tests, run in CI on every push:
 
-Expected output:
-```
-Tests run: 1   (NamespaceTreeTest)     — INode composite tree
-Tests run: 4   (EndToEndTest)          — namespace ops, multi-block, fault tolerance
-Tests run: 4   (HeartbeatReplicationTest) — state machine, block report, re-replication
-Tests run: 4   (TcpPipelineTest)       — real TCP write pipeline, read fallback
-Tests run: 6   (NameNodePersistenceTest) — restart recovery, edit log, fsimage
-
-BUILD SUCCESS — Tests run: 19, Failures: 0, Errors: 0
-```
+| Suite | What it proves |
+|---|---|
+| `ClusterIntegrationTest` | Real NameNode RPC server + 4 on-disk DataNodes over sockets: multi-block round trip; DataNode crash → re-replication; NameNode restart → safe mode → DataNodes rejoin; delete frees disk; corrupt replica detected and repaired; block scanner catches unread corruption; pipeline failure → exclude and retry; foreign-cluster DataNode refused |
+| `NameNodeCorrectnessTest` | Block invalidation on delete (incl. directories); orphan and over-replication handling; abandon + exclusion; namespace edge cases; move survives checkpoint; checkpoint mid-write; lease recovery logged; cluster ID |
+| `NameNodePersistenceTest` | fsimage + edit log replay, rename/delete across restart, ID generators never regress, safe mode |
+| `DiskDataNodeStorageTest` | Blocks survive restart, bit-flip detection + quarantine, half-written block from a crash ignored |
+| `HeartbeatReplicationTest`, `TcpPipelineTest`, `EndToEndTest` | State machine, block report reconciliation, pipeline and read fallback |
 
 ---
 
-## What This Is Not
+## Deliberate simplifications
 
-- **Not a Hadoop/HDFS clone.** No Protobuf, no YARN, no MapReduce, no Zookeeper.
-- **Not production storage.** No checksums, no lease recovery, no safe mode, no HA/standby NameNode, no rack-awareness, no short-circuit reads, no erasure coding.
-- **Not a performance benchmark.** Blocks are buffered fully in memory; no streaming I/O, no NIO, no off-heap buffers.
-
-All simplifications are deliberate and documented. The goal is to demonstrate understanding of the core mechanisms — not to build a deployable system.
-
----
-
-## Deferred (Tier 2)
-
-NameNode HA (standby + QJM + ZKFC + fencing) · Federation · Write leases + pipeline recovery · Erasure coding · Snapshots · Quotas · Security (Kerberos + block tokens) · Short-circuit reads · Safe mode
+| Here | Real HDFS | Why it's fine here |
+|---|---|---|
+| Single NameNode | Active/standby + JournalNode quorum + ZooKeeper failover | Data survives a NameNode crash; HA is the next tier |
+| Whole-block store-and-forward | 64 KB packets, cut-through forwarding | Same protocol shape, simpler buffering |
+| Restart the block on pipeline failure | Repair the pipeline in place, generation stamps | Correct, just re-sends bytes |
+| One CRC per block | CRC per 512-byte chunk | We always read whole blocks |
+| Random placement | Rack-aware placement | Single-rack setup |
+| No retry cache, no auth | Retry cache, Kerberos, block tokens | Out of scope |
 
 ---
 
-## Docs
+## Design docs
 
-| Document | Contents |
-|----------|----------|
-| [`docs/requirement.md`](docs/requirement.md) | Functional + non-functional requirements, capacity math |
-| [`docs/uml/hld-architecture.md`](docs/uml/hld-architecture.md) | Component architecture, control/data plane separation |
-| [`docs/adr/`](docs/adr/) | Architecture decision records |
-| [`docs/learning/`](docs/learning/) | Phase-by-phase deep dives with diagrams |
-| [`docs/interview/`](docs/interview/) | 30+ interview questions across all phases |
+| | |
+|---|---|
+| [Requirements & capacity math](docs/requirement.md) | Why 128 MB blocks, small-files problem, NameNode memory |
+| [HLD](docs/uml/hld-architecture.md) | Components and control/data plane split |
+| [ADRs](docs/adr/) | Language, communication, RPC protocol, storage & integrity |
+| [Learning logs](docs/learning/) | Phase-by-phase deep dives; [phase 8](docs/learning/phase8-production-hardening.md) covers the move to a real cluster |
+| [Interview question bank](docs/interview/) | 70+ questions with key points, by phase |

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usage:
+#   bin/hdfs namenode [--port 8020] [--dir data/namenode] [--block-size 1048576]
+#   bin/hdfs datanode --id dn-1 --port 9001 [--dir data/dn-1] [--namenode localhost:8020]
+#   bin/hdfs dfs [--namenode localhost:8020] [command args...]     (no command = interactive shell)
+set -euo pipefail
+sep=":"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+# Git Bash on Windows: Java needs Windows paths, and HDFS paths like /docs must not be rewritten
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    sep=";"; root="$(cd "$root" && pwd -W)"
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" ;;
+esac
+if [ ! -d "$root/hdfs-client/target/classes/dev" ]; then
+  mvn -q -f "$root/pom.xml" compile
+fi
+cp=""
+for m in hdfs-client hdfs-namenode hdfs-datanode hdfs-common; do
+  cp="${cp:+$cp$sep}$root/$m/target/classes"
+done
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  namenode) exec java -cp "$cp" dev.anurag.hdfs.namenode.NameNodeMain "$@" ;;
+  datanode) exec java -cp "$cp" dev.anurag.hdfs.datanode.DataNodeMain "$@" ;;
+  dfs)      exec java -cp "$cp" dev.anurag.hdfs.client.HdfsCli "$@" ;;
+  *) echo "usage: bin/hdfs (namenode | datanode | dfs) [options]"; exit 2 ;;
+esac
