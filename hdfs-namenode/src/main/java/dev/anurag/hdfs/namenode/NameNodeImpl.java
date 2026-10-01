@@ -501,6 +501,9 @@ public class NameNodeImpl implements INameNodeService, IDatanodeProtocol {
         if (picked.isEmpty()) throw new IOException("No live DataNodes available for " + path);
         long blockId = blockIdGen.getAndIncrement();
         logOp(EditLog.ADD_BLOCK, path, blockId);
+        if (!excludedDatanodes.isEmpty())
+            log("block " + blockId + " of " + path + " placed on " + picked.stream().map(DatanodeInfo::getDatanodeId).toList()
+                    + ", excluding " + excludedDatanodes + " at the client's request");
         for (DatanodeInfo dn : picked) blockMap.addBlock(blockId, dn.getDatanodeId());
         fn.addBlockId(blockId);
         blockToFile.put(blockId, fn);
@@ -514,6 +517,7 @@ public class NameNodeImpl implements INameNodeService, IDatanodeProtocol {
         if (!fn.getBlockIds().isEmpty() && fn.getBlockIds().get(fn.getBlockIds().size() - 1) != blockId)
             throw new IOException("Block " + blockId + " is not the last block of " + path);
         logOp(EditLog.ABANDON_BLOCK, path, blockId);
+        if (editLog != null) log("block " + blockId + " of " + path + " abandoned after a pipeline failure");
         fn.removeLastBlockId(blockId);
         invalidateBlock(blockId);
     }

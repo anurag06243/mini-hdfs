@@ -59,10 +59,11 @@ public class HdfsClient {
      */
     public void put(byte[] data, String hdfsPath) throws IOException {
         nameNode.createFile(hdfsPath, replicationFactor);
+        Set<String> excluded = new HashSet<>(); // nodes that failed stay excluded for the rest of the file
         try {
             for (int offset = 0; offset < data.length; offset += blockSize) {
                 byte[] chunk = Arrays.copyOfRange(data, offset, Math.min(offset + blockSize, data.length));
-                if (useTcp) writeBlockWithRecovery(hdfsPath, chunk);
+                if (useTcp) writeBlockWithRecovery(hdfsPath, chunk, excluded);
                 else writeBlockInMemory(hdfsPath, chunk);
             }
             nameNode.closeFile(hdfsPath, data.length);
@@ -77,8 +78,7 @@ public class HdfsClient {
      * the pipeline blamed, and ask the NameNode for a fresh block on other nodes.
      * (Real HDFS repairs the pipeline in place and keeps the bytes already acknowledged.)
      */
-    private void writeBlockWithRecovery(String path, byte[] chunk) throws IOException {
-        Set<String> excluded = new HashSet<>();
+    private void writeBlockWithRecovery(String path, byte[] chunk, Set<String> excluded) throws IOException {
         PipelineException last = null;
         for (int attempt = 1; attempt <= MAX_BLOCK_ATTEMPTS; attempt++) {
             AddBlockResponse resp = nameNode.addBlock(path, excluded);

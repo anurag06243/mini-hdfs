@@ -16,7 +16,14 @@ to understand them end to end.
 
 ---
 
-## Try it (2 minutes)
+## See it working
+
+**[docs/DEMO.md](docs/DEMO.md)** is a 14-scene walkthrough with real output: a cluster of separate
+processes, multi-block replication, a DataNode crash and self-healing, silent disk corruption
+caught by the block scanner, a node dying mid-upload, a whole-cluster power loss with safe-mode
+recovery, and more. All 14 checks pass. Regenerate it any time with `bin/demo.ps1` (about 30 s).
+
+## Try it yourself (2 minutes)
 
 ```powershell
 mvn -q compile

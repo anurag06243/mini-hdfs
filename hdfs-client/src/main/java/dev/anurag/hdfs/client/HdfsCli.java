@@ -40,11 +40,13 @@ public class HdfsCli {
     public static void main(String[] args) throws Exception {
         String address = System.getenv().getOrDefault("HDFS_NAMENODE", "localhost:8020");
         short replication = 3;
+        boolean echo = false; // print each command after the prompt (useful when input is piped in)
         int i = 0;
         for (; i < args.length && args[i].startsWith("--"); i += 2) {
             if (i + 1 >= args.length) usage("missing value for " + args[i]);
             switch (args[i]) {
                 case "--namenode" -> address = args[i + 1];
+                case "--echo" -> echo = Boolean.parseBoolean(args[i + 1]);
                 case "--replication" -> replication = Short.parseShort(args[i + 1]);
                 default -> usage("unknown option " + args[i]);
             }
@@ -66,18 +68,19 @@ public class HdfsCli {
                     System.exit(1);
                 }
             } else {
-                cli.repl(address);
+                cli.repl(address, echo);
             }
         }
     }
 
-    private void repl(String address) {
+    private void repl(String address, boolean echo) {
         System.out.println("mini-HDFS client connected to NameNode " + address + ". Type 'help' for commands.");
         Scanner in = new Scanner(System.in);
         while (true) {
             System.out.print("hdfs:" + cwd + "> ");
             if (!in.hasNextLine()) return;
             String line = in.nextLine().trim();
+            if (echo) System.out.println(line);
             if (line.isEmpty()) continue;
             if (line.equals("exit") || line.equals("quit")) return;
             try {
