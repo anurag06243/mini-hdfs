@@ -76,6 +76,13 @@ check against.
 Go was the strongest alternative and would have been chosen if the learner were
 already fluent in it.
 
+### Superseding decision (2026-10-02)
+
+**Java 25 LTS, built with Maven.** Java 25 is the latest LTS release. The Maven
+build now uses `--release 25`, CI runs on JDK 25, and the application runtime
+baseline is JDK 25. This supersedes the original Java 22 decision while keeping
+the language and build-tool choices unchanged.
+
 ## Consequences
 
 **Accepted costs**

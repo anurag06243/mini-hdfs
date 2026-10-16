@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/anurag06243/mini-hdfs/actions/workflows/ci.yml/badge.svg)](https://github.com/anurag06243/mini-hdfs/actions/workflows/ci.yml)
 
-A distributed file system in the style of HDFS, written from scratch in Java 21 with **zero
+A distributed file system in the style of HDFS, written from scratch in Java 25 LTS with **zero
 runtime dependencies**. The NameNode, DataNodes, and clients are separate processes that
 talk over TCP: a hand-built binary RPC protocol for metadata and a streaming protocol for
 block data.
